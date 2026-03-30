@@ -1,8 +1,13 @@
 """Thin wrapper to execute SQL against Snowflake and return DataFrames.
 
-Expects environment variables:
-    SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_PASSWORD,
-    SNOWFLAKE_WAREHOUSE, SNOWFLAKE_DATABASE, SNOWFLAKE_SCHEMA
+Supports two auth modes (selected automatically by env vars):
+  1. Key-pair: SNOWFLAKE_PRIVATE_KEY + SNOWFLAKE_PRIVATE_KEY_PASSPHRASE
+  2. Password: SNOWFLAKE_PASSWORD (fallback)
+
+Common env vars:
+    SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER,
+    SNOWFLAKE_WAREHOUSE, SNOWFLAKE_DATABASE, SNOWFLAKE_SCHEMA,
+    SNOWFLAKE_ROLE (optional)
 """
 import os
 from pathlib import Path
@@ -12,16 +17,46 @@ import pandas as pd
 import snowflake.connector
 
 
+def _load_private_key() -> bytes:
+    """Load and decrypt the RSA private key from env var."""
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives import serialization
+
+    key_pem = os.environ["SNOWFLAKE_PRIVATE_KEY"]
+    passphrase = os.environ.get("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE")
+
+    p_key = serialization.load_pem_private_key(
+        key_pem.encode(),
+        password=passphrase.encode() if passphrase else None,
+        backend=default_backend(),
+    )
+    return p_key.private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+
 def get_connection() -> snowflake.connector.SnowflakeConnection:
     """Create a Snowflake connection from environment variables."""
-    return snowflake.connector.connect(
-        account=os.environ["SNOWFLAKE_ACCOUNT"],
-        user=os.environ["SNOWFLAKE_USER"],
-        password=os.environ["SNOWFLAKE_PASSWORD"],
-        warehouse=os.environ["SNOWFLAKE_WAREHOUSE"],
-        database=os.environ.get("SNOWFLAKE_DATABASE", "prod_curated"),
-        schema=os.environ.get("SNOWFLAKE_SCHEMA", "pnm_application"),
-    )
+    connect_args: dict[str, Any] = {
+        "account": os.environ["SNOWFLAKE_ACCOUNT"],
+        "user": os.environ["SNOWFLAKE_USER"],
+        "warehouse": os.environ["SNOWFLAKE_WAREHOUSE"],
+        "database": os.environ.get("SNOWFLAKE_DATABASE", "prod_curated"),
+        "schema": os.environ.get("SNOWFLAKE_SCHEMA", "pnm_application"),
+    }
+
+    role = os.environ.get("SNOWFLAKE_ROLE")
+    if role:
+        connect_args["role"] = role
+
+    if os.environ.get("SNOWFLAKE_PRIVATE_KEY"):
+        connect_args["private_key"] = _load_private_key()
+    else:
+        connect_args["password"] = os.environ["SNOWFLAKE_PASSWORD"]
+
+    return snowflake.connector.connect(**connect_args)
 
 
 def run_sql_file(
