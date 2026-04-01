@@ -169,7 +169,12 @@ historical_bucket_conv AS (
         AND pb.horizon = d.horizon
         AND pb.bucket = hb.bucket
     WHERE hb.service_date < d.target_date
-        AND hb.dow = DAYOFWEEK(d.target_date)
+        -- Peak days: drop weekday constraint (month-end surges are
+        -- calendar-driven, not weekday-driven). Non-peak: same weekday.
+        AND (
+            DAY(d.target_date) >= DAYOFMONTH(LAST_DAY(d.target_date)) - 1
+            OR hb.dow = DAYOFWEEK(d.target_date)
+        )
         -- opp volume bounds are parameterized for optimizer tuning
         AND hb.bucket_opps BETWEEN
             COALESCE(pb.opp_count, 0) * :opp_volume_lower_pct
