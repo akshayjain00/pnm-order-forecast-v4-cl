@@ -3,6 +3,7 @@
 See spec: docs/superpowers/specs/2026-03-27-order-forecast-design.md (Section 5)
 """
 import calendar
+import dataclasses
 import datetime
 from typing import Final
 
@@ -176,3 +177,102 @@ PARAM_RANGES: Final[dict[str, tuple[float, float]]] = {
     "min_pipeline_opps": (3, 10),
     "peak_multiplier_cap": (1.0, 1.3),
 }
+
+# --- Hybrid peak definition: "month_boundary" ---
+# Data-driven from Snowflake backtest: April 1 shows 1.9-2.2x normal volume
+# (month-end spillover). April 2-3 returns to baseline.
+# Peak = last 2 days of current month + first 1 day of next month.
+
+
+def is_peak_date_hybrid(d: datetime.date) -> bool:
+    """Hybrid peak date: last 2 days of month OR first day of next month.
+
+    More accurate than V4's 'last 2 days only' because the month-end
+    surge spills into the first day of the following month (verified
+    from March/April 2025 and 2026 actuals).
+    """
+    last_day = calendar.monthrange(d.year, d.month)[1]
+    return d.day >= last_day - 1 or d.day == 1
+
+
+def is_month_edge(d: datetime.date) -> bool:
+    """V2-style broader month-edge flag for seasonal matching.
+
+    Used to find historically similar days — finds more matches than
+    the narrow peak definition. Edge = day <= 3 OR days_to_end <= 2.
+    """
+    last_day = calendar.monthrange(d.year, d.month)[1]
+    return d.day <= 3 or d.day >= last_day - 2
+
+
+def holiday_phase(d: datetime.date) -> str:
+    """Return 'holiday', 'pre_holiday', 'post_holiday', or 'normal'.
+
+    Used as a matching feature for tiered seasonal matching.
+    """
+    for holiday in HOLIDAYS:
+        delta = (d - holiday).days
+        if delta == 0:
+            return "holiday"
+        if delta == -1:
+            return "pre_holiday"
+        if delta == 1:
+            return "post_holiday"
+    return "normal"
+
+
+@dataclasses.dataclass
+class HybridParams:
+    """All tunable parameters for the hybrid blending engine.
+
+    Designed for mypy strict-mode: every parameter has an explicit type.
+    Default values reflect the final architecture decisions from
+    docs/HYBRID_ARCHITECTURE.md Section 3.4.
+    """
+
+    # Horizon weights: (T+0, T+1, T+2)
+    # T+0=0.80 from V2 (higher pipeline trust when nowcast is active)
+    # T+2=0.55 from V4 (bucketed pipeline is informative at 2-day horizon)
+    horizon_weights: tuple[float, float, float] = (0.80, 0.70, 0.55)
+
+    # Nowcast parameters (T+0 only, from V2)
+    full_switch_share: float = 0.95   # At this share, use nowcast exclusively
+    sparse_pipeline_weight: float = 0.20  # Fallback weight when opps < min
+
+    # Pipeline matching
+    min_pipeline_opps: int = 5
+    opp_volume_lower_pct: float = 0.80   # Wider tolerance than V4's 0.90
+    opp_volume_upper_pct: float = 1.20
+
+    # History lookback (V2's 180 days for deeper conversion match pool)
+    history_lookback_days: int = 180
+
+    # Peak settings
+    peak_multiplier: float = 1.0       # Currently disabled (both models agree)
+    peak_multiplier_cap: float = 1.0   # Hard cap to prevent runaway scaling
+
+    # Seasonal settings (V2's approach)
+    seasonal_top_k: int = 10           # Top-k matches for median
+    seasonal_match_method: str = "median"  # "median" (V2) vs "mean" (V4)
+
+    # Range percentiles — calibrated from backtest residuals (P17.5 / P82.5 for 65% coverage)
+    # Non-peak: calibrated from 58 samples per horizon (reliable).
+    # Peak: calibrated from 12 pooled samples (all horizons); negative upper
+    #   means the model over-predicts peak days on average (see calibration report).
+    #   Re-calibrate after collecting T+2-specific peak backtest data.
+    range_lower_pctl_T0_peak: float = -0.2517
+    range_upper_pctl_T0_peak: float = -0.0380
+    range_lower_pctl_T1_peak: float = -0.2517
+    range_upper_pctl_T1_peak: float = -0.0380
+    range_lower_pctl_T2_peak: float = -0.2517
+    range_upper_pctl_T2_peak: float = -0.0380
+    range_lower_pctl_T0_nonpeak: float = -0.1306
+    range_upper_pctl_T0_nonpeak: float = 0.1142
+    range_lower_pctl_T1_nonpeak: float = -0.2685
+    range_upper_pctl_T1_nonpeak: float = 0.1142
+    range_lower_pctl_T2_nonpeak: float = -0.2685
+    range_upper_pctl_T2_nonpeak: float = 0.1142
+
+
+# Default hybrid parameters (use for production + CLI)
+DEFAULT_HYBRID_PARAMS: HybridParams = HybridParams()
