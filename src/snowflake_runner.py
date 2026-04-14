@@ -16,6 +16,8 @@ from typing import Any
 import pandas as pd
 import snowflake.connector
 
+from src.runtime_logging import emit_runtime_log
+
 
 def _load_private_key() -> bytes:
     """Load and decrypt the RSA private key from env var."""
@@ -71,12 +73,34 @@ def run_sql_file(
         params: Named parameters to bind.
         conn: Optional existing connection. If None, creates one.
     """
-    sql_text = Path(sql_path).read_text()
+    resolved_sql_path = Path(sql_path)
+    sql_text = resolved_sql_path.read_text()
     close_conn = conn is None
-    if conn is None:
-        conn = get_connection()
+    stage = "connect" if conn is None else "execute"
     try:
+        if conn is None:
+            emit_runtime_log(
+                event="snowflake_query",
+                stage="connect",
+                status="start",
+                sql_path=str(resolved_sql_path),
+            )
+            conn = get_connection()
+            emit_runtime_log(
+                event="snowflake_query",
+                stage="connect",
+                status="success",
+                sql_path=str(resolved_sql_path),
+            )
         cur = conn.cursor()
+        stage = "execute"
+        emit_runtime_log(
+            event="snowflake_query",
+            stage="execute",
+            status="start",
+            sql_path=str(resolved_sql_path),
+            param_keys=sorted((params or {}).keys()),
+        )
         cur.execute(sql_text, params or {})
         columns = (
             [desc[0].lower() for desc in cur.description]
@@ -84,7 +108,26 @@ def run_sql_file(
             else []
         )
         rows = cur.fetchall()
+        emit_runtime_log(
+            event="snowflake_query",
+            stage="execute",
+            status="success",
+            sql_path=str(resolved_sql_path),
+            row_count=len(rows),
+            param_keys=sorted((params or {}).keys()),
+        )
         return pd.DataFrame(rows, columns=columns)
+    except Exception as exc:
+        emit_runtime_log(
+            event="snowflake_query",
+            stage=stage,
+            status="failure",
+            sql_path=str(resolved_sql_path),
+            param_keys=sorted((params or {}).keys()),
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
+        raise
     finally:
         if close_conn:
             conn.close()

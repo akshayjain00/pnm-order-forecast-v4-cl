@@ -1,11 +1,11 @@
 -- sql/base_signals.sql
 -- Extracts all forecast signals from Snowflake.
 -- Parameters:
---   :eval_date             DATE   -- The simulated "today" (CURRENT_DATE for production)
---   :backtest_mode         BOOL   -- TRUE for backtesting, FALSE for production
---   :run_hour              INT    -- Hour of day for as-of cutoff (0-23, IST)
---   :opp_volume_lower_pct  FLOAT  -- Lower bound for similar-volume matching (default 0.90)
---   :opp_volume_upper_pct  FLOAT  -- Upper bound for similar-volume matching (default 1.20)
+--   %(eval_date)s             DATE   -- The simulated "today" (CURRENT_DATE for production)
+--   %(backtest_mode)s         BOOL   -- TRUE for backtesting, FALSE for production
+--   %(run_hour)s              INT    -- Hour of day for as-of cutoff (0-23, IST)
+--   %(opp_volume_lower_pct)s  FLOAT  -- Lower bound for similar-volume matching (default 0.90)
+--   %(opp_volume_upper_pct)s  FLOAT  -- Upper bound for similar-volume matching (default 1.20)
 --
 -- Output: One row per (target_date, horizon) with all signals.
 -- See spec Section 3 for signal definitions.
@@ -14,7 +14,7 @@
 WITH dates AS (
     -- Next 3 service dates from eval_date
     SELECT
-        DATEADD(DAY, seq4(), :eval_date::DATE) AS target_date,
+        DATEADD(DAY, seq4(), TO_DATE(%(eval_date)s)) AS target_date,
         seq4() AS horizon
     FROM TABLE(GENERATOR(ROWCOUNT => 3))
 ),
@@ -36,8 +36,8 @@ floor_orders AS (
         AND sr.package_name NOT ILIKE '%nano%'
         -- Backtest as-of filter: only orders created before run_hour of eval_date
         AND (
-            NOT :backtest_mode
-            OR o.created_at < :eval_date::DATE + INTERVAL ':run_hour hours'
+            NOT %(backtest_mode)s
+            OR o.created_at < DATEADD(HOUR, %(run_hour)s, TO_TIMESTAMP_NTZ(%(eval_date)s))
         )
     GROUP BY d.target_date, d.horizon
 ),
@@ -70,8 +70,8 @@ pipeline_buckets AS (
         AND sr.package_name NOT ILIKE '%nano%'
         -- Backtest as-of filter
         AND (
-            NOT :backtest_mode
-            OR opp.created_at < :eval_date::DATE + INTERVAL ':run_hour hours'
+            NOT %(backtest_mode)s
+            OR opp.created_at < DATEADD(HOUR, %(run_hour)s, TO_TIMESTAMP_NTZ(%(eval_date)s))
         )
     GROUP BY d.target_date, d.horizon, bucket
 ),
@@ -121,10 +121,10 @@ hist_bucket_raw AS (
         AND sr.package_name NOT ILIKE '%nano%'
         -- No censoring buffer: past service dates are settled
         AND CAST(sr.shifting_ts + INTERVAL '5 hours, 30 minutes' AS DATE)
-            < :eval_date::DATE
+            < TO_DATE(%(eval_date)s)
         -- Lookback window: 8 weeks
         AND CAST(sr.shifting_ts + INTERVAL '5 hours, 30 minutes' AS DATE)
-            >= DATEADD(WEEK, -8, :eval_date::DATE)
+            >= DATEADD(WEEK, -8, TO_DATE(%(eval_date)s))
     GROUP BY 1, 2, 3
 ),
 
@@ -177,9 +177,9 @@ historical_bucket_conv AS (
         )
         -- opp volume bounds are parameterized for optimizer tuning
         AND hb.bucket_opps BETWEEN
-            COALESCE(pb.opp_count, 0) * :opp_volume_lower_pct
+            COALESCE(pb.opp_count, 0) * %(opp_volume_lower_pct)s
             AND
-            COALESCE(pb.opp_count, 0) * :opp_volume_upper_pct
+            COALESCE(pb.opp_count, 0) * %(opp_volume_upper_pct)s
     GROUP BY d.target_date, d.horizon, hb.bucket
 ),
 
@@ -323,7 +323,7 @@ peak_stats AS (
             AND sr.shifting_type = 'intra_city'
             AND sr.package_name NOT ILIKE '%nano%'
             AND CAST(sr.shifting_ts + INTERVAL '5 hours, 30 minutes' AS DATE)
-                >= DATEADD(MONTH, -12, :eval_date::DATE)
+                >= DATEADD(MONTH, -12, TO_DATE(%(eval_date)s))
         GROUP BY 1
     )
 )

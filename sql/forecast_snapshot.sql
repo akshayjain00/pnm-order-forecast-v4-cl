@@ -7,11 +7,11 @@
 --   * 5 DQ columns
 --
 -- Parameters (same as base_signals.sql):
---   :eval_date             DATE   -- Simulated "today" (CURRENT_DATE for prod)
---   :backtest_mode         BOOL   -- TRUE for backtesting, FALSE for production
---   :run_hour              INT    -- Hour of day for as-of cutoff (0-23, IST)
---   :opp_volume_lower_pct  FLOAT  -- Lower bound for similar-volume matching (default 0.90)
---   :opp_volume_upper_pct  FLOAT  -- Upper bound for similar-volume matching (default 1.20)
+--   %(eval_date)s             DATE   -- Simulated "today" (CURRENT_DATE for prod)
+--   %(backtest_mode)s         BOOL   -- TRUE for backtesting, FALSE for production
+--   %(run_hour)s              INT    -- Hour of day for as-of cutoff (0-23, IST)
+--   %(opp_volume_lower_pct)s  FLOAT  -- Lower bound for similar-volume matching (default 0.90)
+--   %(opp_volume_upper_pct)s  FLOAT  -- Upper bound for similar-volume matching (default 1.20)
 --
 -- Output: One row per (target_date, horizon) with all signals + DQ flags.
 -- NOTE: No status filters on orders or opportunities (all statuses included).
@@ -19,7 +19,7 @@
 WITH dates AS (
     -- Next 3 service dates from eval_date
     SELECT
-        DATEADD(DAY, seq4(), :eval_date::DATE) AS target_date,
+        DATEADD(DAY, seq4(), TO_DATE(%(eval_date)s)) AS target_date,
         seq4() AS horizon
     FROM TABLE(GENERATOR(ROWCOUNT => 3))
 ),
@@ -41,8 +41,8 @@ floor_orders AS (
         AND sr.package_name NOT ILIKE '%nano%'
         -- Backtest as-of filter: only orders created before run_hour of eval_date
         AND (
-            NOT :backtest_mode
-            OR o.created_at < :eval_date::DATE + INTERVAL ':run_hour hours'
+            NOT %(backtest_mode)s
+            OR o.created_at < DATEADD(HOUR, %(run_hour)s, TO_TIMESTAMP_NTZ(%(eval_date)s))
         )
     GROUP BY d.target_date, d.horizon
 ),
@@ -75,8 +75,8 @@ pipeline_buckets AS (
         AND sr.package_name NOT ILIKE '%nano%'
         -- Backtest as-of filter
         AND (
-            NOT :backtest_mode
-            OR opp.created_at < :eval_date::DATE + INTERVAL ':run_hour hours'
+            NOT %(backtest_mode)s
+            OR opp.created_at < DATEADD(HOUR, %(run_hour)s, TO_TIMESTAMP_NTZ(%(eval_date)s))
         )
     GROUP BY d.target_date, d.horizon, bucket
 ),
@@ -125,9 +125,9 @@ hist_bucket_raw AS (
     WHERE sr.shifting_type = 'intra_city'
         AND sr.package_name NOT ILIKE '%nano%'
         AND CAST(sr.shifting_ts + INTERVAL '5 hours, 30 minutes' AS DATE)
-            < :eval_date::DATE
+            < TO_DATE(%(eval_date)s)
         AND CAST(sr.shifting_ts + INTERVAL '5 hours, 30 minutes' AS DATE)
-            >= DATEADD(WEEK, -8, :eval_date::DATE)
+            >= DATEADD(WEEK, -8, TO_DATE(%(eval_date)s))
     GROUP BY 1, 2, 3
 ),
 
@@ -172,9 +172,9 @@ historical_bucket_conv AS (
             OR hb.dow = DAYOFWEEK(d.target_date)
         )
         AND hb.bucket_opps BETWEEN
-            COALESCE(pb.opp_count, 0) * :opp_volume_lower_pct
+            COALESCE(pb.opp_count, 0) * %(opp_volume_lower_pct)s
             AND
-            COALESCE(pb.opp_count, 0) * :opp_volume_upper_pct
+            COALESCE(pb.opp_count, 0) * %(opp_volume_upper_pct)s
     GROUP BY d.target_date, d.horizon, hb.bucket
 ),
 
@@ -272,7 +272,7 @@ peak_stats AS (
             AND sr.shifting_type = 'intra_city'
             AND sr.package_name NOT ILIKE '%nano%'
             AND CAST(sr.shifting_ts + INTERVAL '5 hours, 30 minutes' AS DATE)
-                >= DATEADD(MONTH, -12, :eval_date::DATE)
+                >= DATEADD(MONTH, -12, TO_DATE(%(eval_date)s))
         GROUP BY 1
     )
 ),
@@ -297,8 +297,8 @@ booked_share_hist AS (
         WHERE sr.shifting_type = 'intra_city'
             AND sr.package_name NOT ILIKE '%nano%'
             AND CAST(sr.shifting_ts + INTERVAL '5 hours, 30 minutes' AS DATE)
-                BETWEEN DATEADD(WEEK, -8, :eval_date::DATE)
-                AND DATEADD(DAY, -1, :eval_date::DATE)
+                BETWEEN DATEADD(WEEK, -8, TO_DATE(%(eval_date)s))
+                AND DATEADD(DAY, -1, TO_DATE(%(eval_date)s))
         GROUP BY 1, 2
     ) hist_days
     INNER JOIN (
@@ -312,7 +312,7 @@ booked_share_hist AS (
             AND sr2.shifting_type = 'intra_city'
             AND sr2.package_name NOT ILIKE '%nano%'
             AND CAST(o2.created_at + INTERVAL '5 hours, 30 minutes' AS TIME)
-                < TIMEADD('hour', :run_hour, '00:00:00'::TIME)
+                < TIMEADD('hour', %(run_hour)s, '00:00:00'::TIME)
         GROUP BY 1
     ) booked_so_far ON booked_so_far.service_date = hist_days.service_date
     INNER JOIN (
